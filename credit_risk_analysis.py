@@ -46,6 +46,9 @@ class CreditRiskAnalyzer:
         dataset = load_dataset("amitkedia/Financial-Fraud-Dataset")
         self.data = dataset['train'].to_pandas()
         
+        # Rename columns for consistency
+        self.data.columns = ['text', 'label']
+        
         print("\nDataset shape:", self.data.shape)
         print("\nFirst few rows of the dataset:")
         print(self.data.head())
@@ -53,6 +56,10 @@ class CreditRiskAnalyzer:
         # Basic data info
         print("\nDataset information:")
         print(self.data.info())
+        
+        # Check class distribution
+        print("\nClass distribution:")
+        print(self.data['label'].value_counts())
         
         # Check for missing values
         print("\nMissing values per column:")
@@ -65,48 +72,55 @@ class CreditRiskAnalyzer:
         # Drop any duplicate rows
         self.data = self.data.drop_duplicates()
         
-        # Handle missing values if any
-        # For simplicity, we'll fill numerical columns with median and categorical with mode
-        for col in self.data.columns:
-            if self.data[col].dtype == 'object':
-                self.data[col].fillna(self.data[col].mode()[0], inplace=True)
-            else:
-                self.data[col].fillna(self.data[col].median(), inplace=True)
+        # Handle missing values
+        self.data = self.data.dropna()
         
-        # Convert categorical variables to numerical
-        self.categorical_cols = self.data.select_dtypes(include=['object']).columns
-        self.le_dict = {}
+        # Encode the target variable
+        self.le = LabelEncoder()
+        self.y = self.le.fit_transform(self.data['label'])
         
-        for col in self.categorical_cols:
-            self.le_dict[col] = LabelEncoder()
-            self.data[col] = self.le_dict[col].fit_transform(self.data[col].astype(str))
+        # Text preprocessing
+        from sklearn.feature_extraction.text import TfidfVectorizer
         
-        # Separate features and target
-        self.X = self.data.drop('isFraud', axis=1)
-        self.y = self.data['isFraud']
+        print("\nVectorizing text data...")
+        self.vectorizer = TfidfVectorizer(
+            max_features=5000,  # Limit number of features
+            stop_words='english',
+            ngram_range=(1, 2)  # Consider both unigrams and bigrams
+        )
+        
+        # Split data before vectorization to avoid data leakage
+        X_train, X_test, self.y_train, self.y_test = train_test_split(
+            self.data['text'], self.y, 
+            test_size=0.2, 
+            random_state=42, 
+            stratify=self.y
+        )
+        
+        # Vectorize the text data
+        self.X_train = self.vectorizer.fit_transform(X_train)
+        self.X_test = self.vectorizer.transform(X_test)
         
         # Handle class imbalance using SMOTE
         print("\nClass distribution before SMOTE:")
-        print(self.y.value_counts(normalize=True))
+        print(pd.Series(self.y_train).value_counts(normalize=True))
         
+        # Convert sparse matrix to dense for SMOTE
+        X_train_dense = self.X_train.toarray()
+        
+        # Apply SMOTE
         smote = SMOTE(random_state=42)
-        self.X_resampled, self.y_resampled = smote.fit_resample(self.X, self.y)
+        self.X_train, self.y_train = smote.fit_resample(X_train_dense, self.y_train)
         
         print("\nClass distribution after SMOTE:")
-        print(pd.Series(self.y_resampled).value_counts(normalize=True))
+        print(pd.Series(self.y_train).value_counts(normalize=True))
         
-        # Split the data into training and testing sets
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X_resampled, self.y_resampled, test_size=0.2, random_state=42, stratify=self.y_resampled
-        )
-        
-        # Scale numerical features
-        self.scaler = StandardScaler()
-        self.X_train = self.scaler.fit_transform(self.X_train)
-        self.X_test = self.scaler.transform(self.X_test)
+        # Convert test data to dense
+        self.X_test = self.X_test.toarray()
         
         print(f"\nTraining set shape: {self.X_train.shape}")
         print(f"Testing set shape: {self.X_test.shape}")
+        print(f"Number of features: {self.X_train.shape[1]}")
     
     def train_models(self):
         """Train multiple ML models for comparison."""
@@ -149,21 +163,40 @@ class CreditRiskAnalyzer:
         
         for name, model in self.models.items():
             if hasattr(model, 'feature_importances_'):
-                # Get feature importance
-                importances = model.feature_importances_
-                indices = np.argsort(importances)[::-1]
+                try:
+                    # Get feature importance
+                    importances = model.feature_importances_
+                    
+                    # Get feature names from the vectorizer
+                    feature_names = np.array(self.vectorizer.get_feature_names_out())
+                    
+                    # Sort feature importances in descending order
+                    indices = np.argsort(importances)[::-1]
+                    
+                    # Limit to top 20 features or less if there aren't enough
+                    n_features = min(20, len(importances))
+                    
+                    # Plot
+                    plt.figure(figsize=(12, 8))
+                    plt.title(f"{name} - Top {n_features} Feature Importance")
+                    plt.bar(range(n_features), importances[indices][:n_features])
+                    plt.xticks(range(n_features), 
+                            feature_names[indices][:n_features], 
+                            rotation=90)
+                    plt.tight_layout()
+                    
+                    # Create output directory if it doesn't exist
+                    os.makedirs('output', exist_ok=True)
+                    
+                    # Save the figure
+                    plt.savefig(f"output/{name.lower().replace(' ', '_')}_feature_importance.png")
+                    plt.close()
+                    print(f"Saved feature importance plot for {name}")
+                    
+                except Exception as e:
+                    print(f"Error plotting feature importance for {name}: {str(e)}")
+                    continue
                 
-                # Plot
-                plt.figure(figsize=(12, 6))
-                plt.title(f"{name} - Feature Importance")
-                plt.bar(range(self.X_train.shape[1]), importances[indices][:20])
-                plt.xticks(range(self.X_train.shape[1]), 
-                          [self.X.columns[i] for i in indices[:20]], 
-                          rotation=90)
-                plt.tight_layout()
-                plt.savefig(f"{name.lower().replace(' ', '_')}_feature_importance.png")
-                plt.close()
-    
     def plot_roc_curves(self):
         """Plot ROC curves for all models."""
         print("\nPlotting ROC curves...")
